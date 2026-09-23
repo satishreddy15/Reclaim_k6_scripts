@@ -1,73 +1,103 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { SharedArray } from 'k6/data';
+import Papa from 'https://jslib.k6.io/papaparse/5.1.1/index.js';
 
 export const options = {
-  vus: 1,
-  duration: '1s',
-  thresholds: {
-    http_req_duration: ['p(95)<7000'],
-  },
+    scenarios: {
+        login_test: {
+            executor: 'per-vu-iterations',
+
+            // 10 virtual users
+            vus: 100,
+
+            // Each VU executes only 1 iteration
+            iterations: 1,
+
+           // Enough time for the complete test
+            maxDuration: '90m',
+
+            // Small graceful period
+            gracefulStop: '30s',
+        },
+    },
+
+    thresholds: {
+        http_req_duration: ['p(95)<30000'],
+    },
 };
 
-const BASE_URL = 'https://dev.helloreclaim.com';
+const BASE_URL = 'https://stg-web.helloreclaim.com';
+// const BASE_URL = 'http://192.168.1.238';
 
-export function setup() {
-  const usersPool = Array.from({ length: 10 }, (_, i) => {
-    const uniqueId = 6000 + i; 
-    return {
-      id: uniqueId,
-      email: `satish.techvedika+${uniqueId}@gmail.com`,
-      password: `Password1@33`,
+// Load users from CSV only once
+const users = new SharedArray('users', function () {
+    const csv = open('./LoadTestUsers.csv');
+
+    const parsed = Papa.parse(csv, {
+        header: true,
+        skipEmptyLines: true,
+    });
+
+    console.log(`Users loaded from CSV: ${parsed.data.length}`);
+
+    return parsed.data;
+});
+
+export default function () {
+
+    // Assign one user per VU
+    const user = users[(__VU - 1) % users.length];
+
+    if (!user) {
+        throw new Error(`No user found for VU ${__VU}`);
+    }
+
+    // Supports both Email/Password and email/password CSV headers
+    const email = (user.Email || user.email || '').trim();
+    const password = (user.Password || user.password || '').trim();
+
+    if (!email || !password) {
+        throw new Error(`Invalid CSV data: ${JSON.stringify(user)}`);
+    }
+
+    const payload = JSON.stringify({
+        email: email,
+        password: password,
+        isStaff: false,
+    });
+
+    const params = {
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        },
     };
-  });
 
-  usersPool.forEach((user) => {
-    const signupPayload = JSON.stringify({
-      email: user.email,
-      password: user.password,
-      isStaff: false,
+    const res = http.post(
+        `${BASE_URL}/auth/login`,
+        payload,
+        params
+    );
+
+    console.log("========================================");
+    console.log(`VU       : ${__VU}`);
+    console.log(`Email    : ${email}`);
+    console.log(`Status   : ${res.status}`);
+    console.log(`Response : ${res.body}`);
+    console.log("========================================");
+
+    check(res, {
+        'Login Successful': (r) => r.status === 200,
     });
 
-    http.post(`${BASE_URL}/auth/register`, signupPayload, {
-      headers: { 'Content-Type': 'application/json' },
-    });
-  });
-
-  return { users: usersPool };
+    sleep(1);
 }
 
-export default function (data) {
-  const usersPool = data.users;
-  const randomUser = usersPool[Math.floor(Math.random() * usersPool.length)];
 
-  const loginPayload = JSON.stringify({
-    email: randomUser.email,
-    password: randomUser.password,
-    isStaff: false,
-  });
 
-  const params = {
-    headers: { 'Content-Type': 'application/json' },
-  };
 
-  const loginResponse = http.post(
-    `${BASE_URL}/auth/login`,
-    loginPayload,
-    params
-  );
 
-  console.log(`\n========================================`);
-  console.log(`[LOGIN EMAIL]: ${randomUser.email}`);
-  console.log(`[RESPONSE STATUS]: ${loginResponse.status}`);
-  console.log(`[RESPONSE BODY]: ${loginResponse.body}`);
-  console.log(`========================================\n`);
-
-  check(loginResponse, {
-    'Login Status 200 (Success)': (res) => res.status === 200,
-  });
-
-  sleep(1);
-}
 
 
 
