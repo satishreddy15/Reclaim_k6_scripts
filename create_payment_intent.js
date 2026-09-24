@@ -1,56 +1,784 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check, sleep, fail } from 'k6';
+import { SharedArray } from 'k6/data';
+import Papa from 'https://jslib.k6.io/papaparse/5.1.1/index.js';
 
 export const options = {
-  vus: 1,
-  duration: '1s',
-  thresholds: {
-    http_req_duration: ['p(95)<7000'],
-  },
+    scenarios: {
+        create_payment_intent_test: {
+            executor: 'per-vu-iterations',
+
+            // Change this to 1, 10, 25, 50, etc.
+            vus: 10,
+
+            // Each VU executes one complete flow
+            iterations: 1,
+
+            // Login + Create Booking + Payment Intent
+            maxDuration: '3m',
+
+            gracefulStop: '30s',
+        },
+    },
+
+    thresholds: {
+        http_req_duration: [
+            'p(95)<15000',
+        ],
+    },
 };
 
-const BASE_URL = 'https://dev.helloreclaim.com';
 
-export function setup() {
-  return {
-    bookingId: '073232de-697e-4d27-81bf-f2f3d62886b8', 
-    accessToken:
-'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..94-jq86aILvwX4Vi.2l03tPMEx6a4uMXV-gCpPEJ0kkj54PqbgT0gT-b_2zW0hZiyacJQXr1hnJyl_4VmfOG8SaQc_IeKDA-gSyU69w1CHO4miKqO3BzajJA0pKc_UGMLEYfgpNhCZtGupRh0Dvv7-qM11hakVHvEVEIXdRy2E03L0qEC3j-EE-3tJ_3w0IZE-UHvsyk0RUzCB8KI7wnzLFRHYfMBQ_O9vFZ3_P8OOkKXOjFRKbIa_cKY2CjFITVGFni3ay67RbKb9xXXM7Amnv4riYTOjy9irm1cWKgtbw0EdkbWVsRdWniUPIdaAlLaqXzBq_S-1ERb3WzmaBxsGaE.WZHE68ylwFtgWR_FhZnbiw',
-  };
+// ======================================================
+// BASE URL
+// ======================================================
+
+const BASE_URL =
+    'https://dev.helloreclaim.com';
+
+
+// ======================================================
+// ENDPOINTS
+// ======================================================
+
+const LOGIN_ENDPOINT =
+    '/auth/login';
+
+const CREATE_BOOKING_ENDPOINT =
+    '/booking/create-booking';
+
+const CREATE_PAYMENT_INTENT_ENDPOINT =
+    '/payments/createPaymentIntent';
+
+
+// ======================================================
+// LOAD USERS FROM CSV
+// ======================================================
+
+const users = new SharedArray(
+    'users',
+    function () {
+
+        const csv =
+            open('./LoadTestUsers.csv');
+
+        const parsed =
+            Papa.parse(csv, {
+                header: true,
+                skipEmptyLines: true,
+            });
+
+        if (
+            !parsed.data ||
+            parsed.data.length === 0
+        ) {
+            throw new Error(
+                'LoadTestUsers.csv is empty or could not be parsed.'
+            );
+        }
+
+        console.log(
+            `Users Loaded: ${parsed.data.length}`
+        );
+
+        return parsed.data;
+    }
+);
+
+
+// ======================================================
+// NUMBER TO LETTERS
+// ======================================================
+
+function numberToLetters(num) {
+
+    let result = '';
+
+    while (num > 0) {
+
+        num--;
+
+        result =
+            String.fromCharCode(
+                65 + (num % 26)
+            ) + result;
+
+        num =
+            Math.floor(num / 26);
+    }
+
+    return result.padStart(3, 'A');
 }
 
-export default function (data) {
 
-  const payload = {
-    bookingId: data.bookingId,
-    amount: 68.97,
-    currency: "USD"
-  };
+// ======================================================
+// GENERATE LAST NAME
+// ======================================================
 
-  const params = {
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${data.accessToken}`,
-    },
-  };
+function generateLastName(userNumber) {
 
-  const response = http.post(
-    `${BASE_URL}/payments/createPaymentIntent`,
-    JSON.stringify(payload),
-    params
-  );
+    const letters =
+        numberToLetters(userNumber);
 
-  console.log(`\n========================================`);
-  console.log(`[SCENARIO]: Create Payment Intent`);
-  console.log(`[REQUEST PAYLOAD]: ${JSON.stringify(payload)}`);
-  console.log(`[RESPONSE STATUS]: ${response.status}`);
-  console.log(`[RESPONSE BODY]: ${response.body}`);
-  console.log(`========================================\n`);
+    return (
+        letters.charAt(0).toUpperCase() +
+        letters.slice(1).toLowerCase()
+    );
+}
 
-  check(response, {
-    'Payment Intent Created Successfully': (res) =>
-      res.status === 200 || res.status === 201,
-  });
 
-  sleep(1);
+// ======================================================
+// GENERATE PHONE NUMBER
+// ======================================================
+
+function generatePhoneNumber(userNumber) {
+
+    return (
+        `99234${String(
+            10000 + userNumber
+        ).slice(-5)}`
+    );
+}
+
+
+// ======================================================
+// GENERATE FLIGHT NUMBER
+// ======================================================
+
+function generateFlightNumber(vu) {
+
+    return (
+        `AD${String(
+            1000 +
+            (
+                (vu * 100) +
+                Math.floor(
+                    Math.random() * 900
+                )
+            ) % 9000
+        )}`
+    );
+}
+
+
+// ======================================================
+// MAIN TEST
+// ======================================================
+
+export default function () {
+
+    // ==================================================
+    // GET USER FOR CURRENT VU
+    // ==================================================
+
+    const userIndex =
+        __VU - 1;
+
+    if (
+        userIndex >= users.length
+    ) {
+
+        fail(
+            `No CSV user found for VU ${__VU}. ` +
+            `Required CSV row: ${userIndex + 1}`
+        );
+    }
+
+    const user =
+        users[userIndex];
+
+
+    // ==================================================
+    // READ EMAIL
+    // ==================================================
+
+    const email =
+        String(
+            user.Email ||
+            user.email ||
+            ''
+        ).trim();
+
+
+    // ==================================================
+    // READ PASSWORD
+    // ==================================================
+
+    const password =
+        String(
+            user.Password ||
+            user.password ||
+            ''
+        ).trim();
+
+
+    if (!email || !password) {
+
+        fail(
+            `Invalid CSV data at row ${userIndex + 1}. ` +
+            `Email or Password is missing.`
+        );
+    }
+
+
+    // ==================================================
+    // USER NUMBER
+    // ==================================================
+
+    const match =
+        email.match(/\+(\d+)@/);
+
+    const userNumber =
+        match
+            ? Number(match[1])
+            : userIndex + 1;
+
+
+    // ==================================================
+    // DYNAMIC USER DETAILS
+    // ==================================================
+
+    const firstName =
+        'Satish';
+
+    const lastName =
+        generateLastName(userNumber);
+
+    const fullName =
+        `${firstName} ${lastName}`;
+
+    const phoneNumber =
+        generatePhoneNumber(userNumber);
+
+    const flightNumber =
+        generateFlightNumber(__VU);
+
+
+    // ==================================================
+    // LOG TEST INFORMATION
+    // ==================================================
+
+    console.log(
+        '================================================'
+    );
+
+    console.log(
+        `VU             : ${__VU}`
+    );
+
+    console.log(
+        `CSV Row        : ${userIndex + 1}`
+    );
+
+    console.log(
+        `Email          : ${email}`
+    );
+
+    console.log(
+        `Full Name      : ${fullName}`
+    );
+
+    console.log(
+        `Phone Number   : ${phoneNumber}`
+    );
+
+    console.log(
+        `Flight Number  : ${flightNumber}`
+    );
+
+    console.log(
+        '================================================'
+    );
+
+
+    // ==================================================
+    // STEP 1 - LOGIN
+    // ==================================================
+
+    console.log(
+        'STEP 1: Login'
+    );
+
+
+    const loginPayload =
+        JSON.stringify({
+
+            email:
+                email,
+
+            password:
+                password,
+
+        });
+
+
+    const loginParams = {
+
+        headers: {
+
+            Accept:
+                'application/json',
+
+            'Content-Type':
+                'application/json',
+
+        },
+
+        timeout:
+            '30s',
+    };
+
+
+    const loginResponse =
+        http.post(
+
+            `${BASE_URL}${LOGIN_ENDPOINT}`,
+
+            loginPayload,
+
+            loginParams
+
+        );
+
+
+    console.log(
+        `Login Status : ${loginResponse.status}`
+    );
+
+    console.log(
+        `Login Time   : ${loginResponse.timings.duration} ms`
+    );
+
+
+    if (
+        loginResponse.status !== 200 &&
+        loginResponse.status !== 201
+    ) {
+
+        console.log(
+            `Login Response : ${loginResponse.body}`
+        );
+
+        fail(
+            `Login failed for ${email}. ` +
+            `HTTP Status: ${loginResponse.status}`
+        );
+    }
+
+
+    // ==================================================
+    // GET ACCESS TOKEN
+    // ==================================================
+
+    let loginBody;
+
+    try {
+
+        loginBody =
+            loginResponse.json();
+
+    } catch (error) {
+
+        fail(
+            `Invalid JSON response from Login API for ${email}`
+        );
+    }
+
+
+    const accessToken =
+        loginBody?.accessToken ||
+        loginBody?.data?.accessToken ||
+        loginBody?.token ||
+        loginBody?.data?.token;
+
+
+    if (!accessToken) {
+
+        fail(
+            `Access token was not found for ${email}`
+        );
+    }
+
+
+    console.log(
+        `Login successful for VU ${__VU}`
+    );
+
+
+    // ==================================================
+    // STEP 2 - CREATE BOOKING
+    // ==================================================
+
+    console.log(
+        'STEP 2: Create Booking'
+    );
+
+
+    const bookingPayload =
+        JSON.stringify({
+
+            airlineId:
+                'b875b193-9384-4f0a-abcc-2834c557fb6e',
+
+            airportId:
+                '0031e52b-39af-4c62-b39b-6c538d2a8214',
+
+            carryonBagsCount:
+                2,
+
+            checkBagsCount:
+                0,
+
+            confirmGuest:
+                false,
+
+            countryCode:
+                '+91',
+
+            dropLatitude:
+                '25.8180725',
+
+            dropLongitude:
+                '-80.1220435',
+
+            email:
+                email,
+
+            flightNumber:
+                flightNumber,
+
+            fullName:
+                fullName,
+
+            phoneNumber:
+                phoneNumber,
+
+            pickupHotelId:
+                '288e38a8-0ba5-4c67-814b-c02360229a7d',
+
+            pickupLatitude:
+                '25.8180725',
+
+            pickupLocation:
+                'Hotel Lake View Airport Zone',
+
+            pickupLongitude:
+                '-80.1220435',
+
+            pickupType:
+                'HOTEL',
+
+            specialLuggage:
+                true,
+
+            timezone:
+                'America/New_York',
+
+            travelDate:
+                '2026-10-30T15:05',
+        });
+
+
+    const bookingParams = {
+
+        headers: {
+
+            Authorization:
+                `Bearer ${accessToken}`,
+
+            'Content-Type':
+                'application/json',
+
+            Accept:
+                'application/json',
+
+            'User-Agent':
+                'k6-load-test',
+        },
+
+        timeout:
+            '30s',
+    };
+
+
+    const bookingResponse =
+        http.post(
+
+            `${BASE_URL}${CREATE_BOOKING_ENDPOINT}`,
+
+            bookingPayload,
+
+            bookingParams
+
+        );
+
+
+    console.log(
+        `Booking Status   : ${bookingResponse.status}`
+    );
+
+    console.log(
+        `Booking Duration : ${bookingResponse.timings.duration} ms`
+    );
+
+    console.log(
+        `Booking Response : ${bookingResponse.body}`
+    );
+
+
+    const bookingSuccess =
+        bookingResponse.status === 200 ||
+        bookingResponse.status === 201;
+
+
+    // ==================================================
+    // EXTRACT BOOKING ID
+    // ==================================================
+
+    let bookingId = null;
+
+    if (bookingSuccess) {
+
+        let bookingBody;
+
+        try {
+
+            bookingBody =
+                bookingResponse.json();
+
+        } catch (error) {
+
+            console.log(
+                'Create Booking returned invalid JSON.'
+            );
+        }
+
+
+        if (bookingBody) {
+
+            bookingId =
+                bookingBody?.bookingId ||
+                bookingBody?.data?.bookingId ||
+                bookingBody?.data?.booking?.bookingId ||
+                bookingBody?.booking?.bookingId ||
+                bookingBody?.data?.id ||
+                bookingBody?.id;
+        }
+    }
+
+
+    if (!bookingId) {
+
+        console.log(
+            'Booking ID was not found.'
+        );
+
+        console.log(
+            `Booking Response: ${bookingResponse.body}`
+        );
+    }
+
+
+    if (bookingId) {
+
+        console.log(
+            `Booking created successfully`
+        );
+
+        console.log(
+            `Booking ID : ${bookingId}`
+        );
+    }
+
+
+    // ==================================================
+    // STEP 3 - CREATE PAYMENT INTENT
+    // ==================================================
+
+    let paymentSuccess = false;
+
+    let paymentResponse = null;
+
+
+    if (bookingId) {
+
+        console.log(
+            'STEP 3: Create Payment Intent'
+        );
+
+
+        const paymentPayload =
+            JSON.stringify({
+
+                bookingId:
+                    bookingId,
+
+                amount:
+                    53.37,
+
+                currency:
+                    'USD',
+
+            });
+
+
+        const paymentParams = {
+
+            headers: {
+
+                Authorization:
+                    `Bearer ${accessToken}`,
+
+                'Content-Type':
+                    'application/json',
+
+                Accept:
+                    'application/json',
+
+                'User-Agent':
+                    'k6-load-test',
+            },
+
+            timeout:
+                '30s',
+        };
+
+
+        paymentResponse =
+            http.post(
+
+                `${BASE_URL}${CREATE_PAYMENT_INTENT_ENDPOINT}`,
+
+                paymentPayload,
+
+                paymentParams
+
+            );
+
+
+        console.log(
+            `Payment Status   : ${paymentResponse.status}`
+        );
+
+        console.log(
+            `Payment Duration : ${paymentResponse.timings.duration} ms`
+        );
+
+        console.log(
+            `Payment Response : ${paymentResponse.body}`
+        );
+
+
+        // ----------------------------------------------
+        // CHECK FOR FRONTEND HTML
+        // ----------------------------------------------
+
+        const contentType =
+            paymentResponse.headers['Content-Type'] || '';
+
+
+        const isHtmlResponse =
+
+            contentType
+                .toLowerCase()
+                .includes('text/html') ||
+
+            paymentResponse.body
+                .trim()
+                .startsWith('<!doctype html') ||
+
+            paymentResponse.body
+                .trim()
+                .startsWith('<html');
+
+
+        if (isHtmlResponse) {
+
+            console.log(
+                'Payment Intent returned frontend HTML.'
+            );
+
+            console.log(
+                'Check the Payment Intent API endpoint.'
+            );
+
+        } else {
+
+            paymentSuccess =
+                paymentResponse.status === 200 ||
+                paymentResponse.status === 201;
+        }
+
+    } else {
+
+        console.log(
+            'Payment Intent skipped because bookingId was not available.'
+        );
+    }
+
+
+    const completeFlowSuccess =
+        bookingSuccess &&
+        !!bookingId &&
+        paymentSuccess;
+
+
+    check(null, {
+
+        'Booking and Payment Intent flow completed successfully':
+            () => completeFlowSuccess,
+
+    });
+
+
+    // ==================================================
+    // FINAL RESULT
+    // ==================================================
+
+    console.log(
+        '================================================'
+    );
+
+    console.log(
+        `VU             : ${__VU}`
+    );
+
+    console.log(
+        `Email          : ${email}`
+    );
+
+    console.log(
+        `Booking ID     : ${bookingId || 'NOT CREATED'}`
+    );
+
+    console.log(
+        `Booking        : ${
+            bookingSuccess
+                ? 'SUCCESS'
+                : 'FAILED'
+        }`
+    );
+
+    console.log(
+        `Payment Intent : ${
+            paymentSuccess
+                ? 'SUCCESS'
+                : 'FAILED'
+        }`
+    );
+
+    console.log(
+        `Complete Flow  : ${
+            completeFlowSuccess
+                ? 'SUCCESS'
+                : 'FAILED'
+        }`
+    );
+
+    console.log(
+        '================================================'
+    );
+
+
+    sleep(1);
 }
